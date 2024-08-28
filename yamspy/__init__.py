@@ -49,14 +49,12 @@ import time
 import sys
 from threading import Lock
 
-if "linux" in sys.platform:
-    import ctypes
-    ffs = ctypes.cdll.LoadLibrary('libc.so.6').ffs # this is only for ffs... it should be directly implemented.
-else:
-    def ffs(x): # modified from https://stackoverflow.com/a/36059264
-        return (x&-x).bit_length()
+def ffs(x): # modified from https://stackoverflow.com/a/36059264
+    return (x&-x).bit_length()
 
 import serial # pyserial version???
+
+logger = logging.getLogger('__FILE__')
 
 class MSPy:
 
@@ -288,7 +286,10 @@ class MSPy:
         'MSP2_PID':                           0x2030,
         'MSP2_SET_PID':                       0x2031,
 
-        'MSP2_INAV_OPFLOW_CALIBRATION':       0x2032
+        'MSP2_INAV_OPFLOW_CALIBRATION':       0x2032,
+
+        'MSP2_SENSOR_RANGEFINDER': 0x1f01,
+        'MSP2_SENSOR_OPTICAL_FLOW': 0x1f02,
     }
 
     # The idea is to automate, so only the dictionary above needs to be updated
@@ -412,6 +413,17 @@ class MSPy:
         }
 
         self.ANALOG = {}
+
+        self.OPTICAL_FLOW = {
+            'quality': 0,
+            'motion_x': 0,
+            'motion_y': 0,
+        }
+
+        self.RANGEFINDER = {
+            'quality': 0,
+            'distance_mm': 0,
+        }
 
         self.VOLTAGE_METERS = []
 
@@ -830,15 +842,7 @@ class MSPy:
             26: "BLOCKED_INVALID_SETTING"
             }
 
-        if logfilename:
-            logging.basicConfig(format="[%(levelname)s] [%(asctime)s]: %(message)s",
-                                filename=logfilename, 
-                                filemode=logfilemode,
-                                level=getattr(logging, loglevel.upper()))
-        else:
-            logging.basicConfig(format="[%(levelname)s] [%(asctime)s]: %(message)s",
-                                level=getattr(logging, loglevel.upper()),
-                                stream=sys.stdout)
+        logger.setLevel(loglevel)
 
         # For some reason, passing the arguments doesn't work and
         # the serial fails...
@@ -879,7 +883,7 @@ class MSPy:
         if self.is_serial_open:
             return self
         else:
-            logging.warning("Serial port ({}) not ready/available".format(self.conn.port))
+            logger.warning("Serial port ({}) not ready/available".format(self.conn.port))
             return 1
 
 
@@ -912,10 +916,10 @@ class MSPy:
                 return 0
                 
             except serial.SerialException as err:
-                logging.warning("Error opening the serial port ({0}): {1}".format(self.conn.port, err))
+                logger.warning("Error opening the serial port ({0}): {1}".format(self.conn.port, err))
             
             except FileNotFoundError as err:
-                logging.warning("Port ({0}) not found: {1}".format(self.conn.port, err))
+                logger.warning("Port ({0}) not found: {1}".format(self.conn.port, err))
 
             time.sleep(delay)
         
@@ -1069,7 +1073,7 @@ class MSPy:
             timeout = time.time() + timeout
             while True:
                 if time.time() >= timeout:
-                    logging.warning("Timeout occured when receiving a message")
+                    logger.warning("Timeout occured when receiving a message")
                     break
                 msg_header = local_read()
                 if msg_header:
@@ -1100,13 +1104,13 @@ class MSPy:
                 try:
                     data = received_bytes[di]
                     di += 1
-                    logging.debug("State: {1} - byte received (at {0}): {2}".format(dataHandler['last_received_timestamp'], 
+                    logger.debug("State: {1} - byte received (at {0}): {2}".format(dataHandler['last_received_timestamp'], 
                                                                             dataHandler['state'], 
                                                                             data))
                 except IndexError:
                     # Instead of crashing everything, let's just ignore this msg...
                     # ... and hope for the best :)
-                    logging.debug('IndexError detected on state: {}'.format(dataHandler['state']))
+                    logger.debug('IndexError detected on state: {}'.format(dataHandler['state']))
                     dataHandler['state'] = -1
                     break # Sends it to the error state
 
@@ -1123,14 +1127,14 @@ class MSPy:
                         dataHandler['msp_version'] = 2
                         dataHandler['state'] = 2
                     else: # something went wrong, no M received...
-                        logging.debug('Something went wrong, no M received.')
+                        logger.debug('Something went wrong, no M received.')
                         break # sends it to the error state
 
                 elif dataHandler['state'] == 2: # direction (should be >)
                     dataHandler['unsupported'] = 0
                     if (data == 33): # !
                         # FC reports unsupported message error
-                        logging.debug('FC reports unsupported message error.')
+                        logger.debug('FC reports unsupported message error.')
                         dataHandler['unsupported'] = 1
                         break # sends it to the error state
                     else:
@@ -1161,7 +1165,7 @@ class MSPy:
                 elif dataHandler['state'] == 3:
                     dataHandler['message_length_expected'] = data # 4th byte
                     if dataHandler['message_length_expected'] == MSPy.JUMBO_FRAME_SIZE_LIMIT:
-                        logging.debug("JumboFrame received.")
+                        logger.debug("JumboFrame received.")
                         dataHandler['messageIsJumboFrame'] = True
 
                     # start the checksum procedure
@@ -1212,7 +1216,7 @@ class MSPy:
                 elif dataHandler['state'] == 6:
                     # calculates the JumboFrame size
                     dataHandler['message_length_expected'] +=  256 * data
-                    logging.debug("JumboFrame message_length_expected: {}".format(dataHandler['message_length_expected']))
+                    logger.debug("JumboFrame message_length_expected: {}".format(dataHandler['message_length_expected']))
                     # There's no way to check for transmission errors here...
                     # In the worst scenario, it will try to read 255 + 256*255 = 65535 bytes
 
@@ -1249,12 +1253,12 @@ class MSPy:
                         if dataHandler['msp_version'] == 1:
                             if dataHandler['message_checksum'] == data:
                                 # checksum is correct, message received, store dataview
-                                logging.debug("Message received (length {1}) - Code {0}".format(dataHandler['code'], dataHandler['message_length_received']))
+                                logger.debug("Message received (length {1}) - Code {0}".format(dataHandler['code'], dataHandler['message_length_received']))
                                 dataHandler['dataView'] = dataHandler['message_buffer'] # keep same names from betaflight-configurator code
                                 return dataHandler
                             else:
                                 # wrong checksum
-                                logging.debug('Code: {0} - crc failed (received {1}, calculated {2})'.format(dataHandler['code'], 
+                                logger.debug('Code: {0} - crc failed (received {1}, calculated {2})'.format(dataHandler['code'], 
                                                                                                             data,
                                                                                                             dataHandler['message_checksum']))
                                 dataHandler['crcError'] = True
@@ -1270,19 +1274,19 @@ class MSPy:
                                 dataHandler['message_checksum'] = self._crc8_dvb_s2(dataHandler['message_checksum'], dataHandler['message_buffer'][si])
                             if dataHandler['message_checksum'] == data:
                                 # checksum is correct, message received, store dataview
-                                logging.debug("Message received (length {1}) - Code {0}".format(dataHandler['code'], dataHandler['message_length_received']))
+                                logger.debug("Message received (length {1}) - Code {0}".format(dataHandler['code'], dataHandler['message_length_received']))
                                 dataHandler['dataView'] = dataHandler['message_buffer'] # keep same names from betaflight-configurator code
                                 return dataHandler
                             else:
                                 # wrong checksum
-                                logging.debug('Code: {0} - crc failed (received {1}, calculated {2})'.format(dataHandler['code'], 
+                                logger.debug('Code: {0} - crc failed (received {1}, calculated {2})'.format(dataHandler['code'], 
                                                                                                             data,
                                                                                                             dataHandler['message_checksum']))
                                 dataHandler['crcError'] = True
                                 break # sends it to the error state
 
             # it means an error occurred
-            logging.debug('Error detected on state: {}'.format(dataHandler['state']))
+            logger.debug('Error detected on state: {}'.format(dataHandler['state']))
             dataHandler['packet_error'] = 1
 
             return dataHandler
@@ -1395,12 +1399,12 @@ class MSPy:
         return buffer 
 
     def save2eprom(self):
-        logging.info("Save to EPROM requested") # some configs also need reboot to be applied (not online).
+        logger.info("Save to EPROM requested") # some configs also need reboot to be applied (not online).
         return self.send_RAW_msg(MSPy.MSPCodes['MSP_EEPROM_WRITE'], data=[])
 
 
     def reboot(self):
-        logging.info("Reboot requested")
+        logger.info("Reboot requested")
         return self.send_RAW_msg(MSPy.MSPCodes['MSP_SET_REBOOT'], data=[])
 
 
@@ -1521,7 +1525,7 @@ class MSPy:
             finally:
                 self.serial_port_write_lock.release()
                 if res>0:
-                    logging.debug("RAW message sent: {}".format(bufView))
+                    logger.debug("RAW message sent: {}".format(bufView))
 
                 return res
     
@@ -1556,13 +1560,13 @@ class MSPy:
         data = dataHandler['dataView'] # DataView (allowing us to view arrayBuffer as struct/union)
         code = dataHandler['code']
         if code == 0: # code==0 means nothing was received...
-            logging.debug("Nothing was received - Code 0")
+            logger.debug("Nothing was received - Code 0")
             return -1
         elif dataHandler['crcError']:
-            logging.debug("dataHandler has a crcError.")
+            logger.debug("dataHandler has a crcError.")
             return -2
         elif dataHandler['packet_error']:
-            logging.debug("dataHandler has a packet_error.")
+            logger.debug("dataHandler has a packet_error.")
             return -3
         else:
             if (not dataHandler['unsupported']):
@@ -1575,13 +1579,13 @@ class MSPy:
                         else:
                             return 0 # because a valid message may contain no data...
                     except IndexError as err:
-                        logging.debug('Received data processing error: {}'.format(err))
+                        logger.debug('Received data processing error: {}'.format(err))
                         return -4
                 else:
-                    logging.debug('Unknown code received: {}'.format(code))
+                    logger.debug('Unknown code received: {}'.format(code))
                     return -5
             else:
-                logging.debug('FC reports unsupported message error - Code {}'.format(code))
+                logger.debug('FC reports unsupported message error - Code {}'.format(code))
                 return -6
         
 
@@ -1695,6 +1699,18 @@ class MSPy:
         self.ANALOG['last_received_timestamp'] = int(time.time()) # why not monotonic? where is time synchronized?
         if not self.INAV:
             self.ANALOG['voltage'] = self.readbytes(data, size=16, unsigned=True) / 100
+
+    def process_MSP2_SENSOR_OPTICAL_FLOW(self, data):
+        self.OPTICAL_FLOW['quality'] = self.readbytes(data, size=8, unsigned=True)
+        self.OPTICAL_FLOW['motion_x'] = self.readbytes(data, size=32)
+        self.OPTICAL_FLOW['motion_y'] = self.readbytes(data, size=32)
+
+    def process_MSP2_SENSOR_RANGEFINDER(self, data):
+        self.RANGEFINDER['quality'] = self.readbytes(data, size=8, unsigned=True)
+        distance = self.readbytes(data, size=32)
+        if distance <= 0:
+            return
+        self.RANGEFINDER['distance_mm'] = distance
     
     def process_MSPV2_INAV_ANALOG(self, data):
         if self.INAV:
@@ -2019,52 +2035,52 @@ class MSPy:
     # def process_MSP_DISPLAYPORT(self, data):
 
     def process_MSP_SET_RAW_RC(self, data):
-        logging.debug('RAW RC values updated')
+        logger.debug('RAW RC values updated')
 
     def process_MSP_SET_PID(self, data):
-        logging.info('PID settings saved')
+        logger.info('PID settings saved')
 
     def process_MSP_SET_RC_TUNING(self, data):
-        logging.info('RC Tuning saved')
+        logger.info('RC Tuning saved')
 
     def process_MSP_ACC_CALIBRATION(self, data):
-        logging.info('Accel calibration executed')
+        logger.info('Accel calibration executed')
 
     def process_MSP_MAG_CALIBRATION(self, data):
-        logging.info('Mag calibration executed')
+        logger.info('Mag calibration executed')
 
     def process_MSP_SET_MOTOR_CONFIG(self, data):
-        logging.info('Motor Configuration saved')
+        logger.info('Motor Configuration saved')
 
     def process_MSP_SET_GPS_CONFIG(self, data):
-        logging.info('GPS Configuration saved')
+        logger.info('GPS Configuration saved')
 
     def process_MSP_SET_RSSI_CONFIG(self, data):
-        logging.info('RSSI Configuration saved')
+        logger.info('RSSI Configuration saved')
 
     def process_MSP_SET_FEATURE_CONFIG(self, data):
-        logging.info('Features saved')
+        logger.info('Features saved')
 
     def process_MSP_SET_BEEPER_CONFIG(self, data):
-        logging.info('Beeper Configuration saved')
+        logger.info('Beeper Configuration saved')
 
     def process_MSP_RESET_CONF(self, data):
-        logging.info('Settings Reset')
+        logger.info('Settings Reset')
 
     def process_MSP_SELECT_SETTING(self, data):
-        logging.info('Profile selected')
+        logger.info('Profile selected')
 
     def process_MSP_SET_SERVO_CONFIGURATION(self, data):
-        logging.info('Servo Configuration saved')
+        logger.info('Servo Configuration saved')
 
     def process_MSP_EEPROM_WRITE(self, data):
-        logging.info('Settings Saved in EEPROM')
+        logger.info('Settings Saved in EEPROM')
 
     def process_MSP_SET_CURRENT_METER_CONFIG(self, data):
-        logging.info('Amperage Settings saved')
+        logger.info('Amperage Settings saved')
 
     def process_MSP_SET_VOLTAGE_METER_CONFIG(self, data):
-        logging.info('Voltage config saved')
+        logger.info('Voltage config saved')
         
     def process_MSP_DEBUG(self, data):
         for i in range(4):
@@ -2075,7 +2091,7 @@ class MSPy:
             self.SENSOR_DATA['debug'][i] = self.readbytes(data, size=32, unsigned=False)
 
     def process_MSP_SET_MOTOR(self, data):
-        logging.info('Motor Speeds Updated')
+        logger.info('Motor Speeds Updated')
 
     def process_MSP_UID(self, data):
         for i in range(3):
@@ -2086,7 +2102,7 @@ class MSPy:
         self.CONFIG['accelerometerTrims'][1] = self.readbytes(data, size=16, unsigned=False) # roll
 
     def process_MSP_SET_ACC_TRIM(self, data):
-        logging.info('Accelerometer trimms saved.')
+        logger.info('Accelerometer trimms saved.')
 
     def process_MSP_GPS_SV_INFO(self, data):
         if (len(data) > 0):
@@ -2105,7 +2121,7 @@ class MSPy:
             self.RC_MAP.append(self.readbytes(data, size=8, unsigned=True))
 
     def process_MSP_SET_RX_MAP(self, data):
-        logging.debug('RCMAP saved')
+        logger.debug('RCMAP saved')
         
     def process_MSP_MIXER_CONFIG(self, data):
         self.MIXER_CONFIG['mixer'] = self.readbytes(data, size=8, unsigned=True)
@@ -2138,9 +2154,9 @@ class MSPy:
 
         if ((rebootType == self.REBOOT_TYPES['MSC']) or (rebootType == self.REBOOT_TYPES['MSC_UTC'])):
             if (self.readbytes(data, size=8, unsigned=True) == 0):
-                logging.warning('Storage device not ready for reboot.')
+                logger.warning('Storage device not ready for reboot.')
 
-        logging.info('Reboot request accepted')
+        logger.info('Reboot request accepted')
 
     def process_MSP_API_VERSION(self, data):
         self.CONFIG['mspProtocolVersion'] = self.readbytes(data, size=8, unsigned=True)
@@ -2218,7 +2234,7 @@ class MSPy:
             self.CONFIG['name'] += chr(char)
 
     # def process_MSP_SET_CHANNEL_FORWARDING(self, data):
-    #     logging.info('Channel forwarding saved')
+    #     logger.info('Channel forwarding saved')
 
     def process_MSP_CF_SERIAL_CONFIG(self, data):
         self.SERIAL_CONFIG['ports'] = []
@@ -2238,7 +2254,7 @@ class MSPy:
             self.SERIAL_CONFIG['ports'].append(serialPort)
 
     def process_MSP_SET_CF_SERIAL_CONFIG(self, data):
-        logging.info('Serial config saved')
+        logger.info('Serial config saved')
 
     def process_MSP_MODE_RANGES(self, data):
         self.MODE_RANGES = [] # empty the array as new data is coming in
@@ -2384,7 +2400,7 @@ class MSPy:
             self.FILTER_CONFIG['gyroStage2LowpassHz'] = self.readbytes(data, size=16, unsigned=True)
 
     def process_MSP_SET_PID_ADVANCED(self, data):
-        logging.info("Advanced PID settings saved")
+        logger.info("Advanced PID settings saved")
 
     def process_MSP_PID_ADVANCED(self, data):
         self.ADVANCED_TUNING['rollPitchItermIgnoreRate'] = self.readbytes(data, size=16, unsigned=True)
@@ -2456,7 +2472,7 @@ class MSPy:
         # update_dataflash_global();
 
     def process_MSP_DATAFLASH_ERASE(self, data):
-        logging.info("Data flash erase begun...")
+        logger.info("Data flash erase begun...")
 
     def process_MSP_SDCARD_SUMMARY(self, data):
         flags = self.readbytes(data, size=8, unsigned=True)
@@ -2478,7 +2494,7 @@ class MSPy:
         else:
             pass # API no longer supported (INAV 2.3.0)
     def process_MSP_SET_BLACKBOX_CONFIG(self, data):
-        logging.info("Blackbox config saved")
+        logger.info("Blackbox config saved")
 
     # TODO: This changed and it will need to check the BF version to decode things correctly
     # def process_MSP_TRANSPONDER_CONFIG(self, data):
@@ -2507,88 +2523,88 @@ class MSPy:
     #         self.TRANSPONDER['data'].append(self.readbytes(data, size=8, unsigned=True))
 
     def process_MSP_SET_TRANSPONDER_CONFIG(self, data):
-        logging.info("Transponder config saved")
+        logger.info("Transponder config saved")
 
     def process_MSP_SET_MODE_RANGE(self, data):
-        logging.info('Mode range saved')
+        logger.info('Mode range saved')
 
     def process_MSP_SET_ADJUSTMENT_RANGE(self, data):
-        logging.info('Adjustment range saved')
+        logger.info('Adjustment range saved')
         
     def process_MSP_SET_BOARD_ALIGNMENT_CONFIG(self, data):
-        logging.info('Board alignment saved')
+        logger.info('Board alignment saved')
         
     def process_MSP_PID_CONTROLLER(self, data):
         self.PID['controller'] = self.readbytes(data, size=8, unsigned=True)
         
     def process_MSP_SET_PID_CONTROLLER(self, data):
-        logging.info('PID controller changed')
+        logger.info('PID controller changed')
         
     def process_MSP_SET_LOOP_TIME(self, data):
-        logging.info('Looptime saved')
+        logger.info('Looptime saved')
         
     def process_MSP_SET_ARMING_CONFIG(self, data):
-        logging.info('Arming config saved')
+        logger.info('Arming config saved')
         
     def process_MSP_SET_RESET_CURR_PID(self, data):
-        logging.info('Current PID profile reset')
+        logger.info('Current PID profile reset')
         
     def process_MSP_SET_MOTOR_3D_CONFIG(self, data):
-        logging.info('3D settings saved')
+        logger.info('3D settings saved')
         
     def process_MSP_SET_MIXER_CONFIG(self, data):
-        logging.info('Mixer config saved')
+        logger.info('Mixer config saved')
         
     def process_MSP_SET_RC_DEADBAND(self, data):
-        logging.info('Rc controls settings saved')
+        logger.info('Rc controls settings saved')
         
     def process_MSP_SET_SENSOR_ALIGNMENT(self, data):
-        logging.info('Sensor alignment saved')
+        logger.info('Sensor alignment saved')
         
     def process_MSP_SET_RX_CONFIG(self, data):
-        logging.info('Rx config saved')
+        logger.info('Rx config saved')
         
     def process_MSP_SET_RXFAIL_CONFIG(self, data):
-        logging.info('Rxfail config saved')
+        logger.info('Rxfail config saved')
         
     def process_MSP_SET_FAILSAFE_CONFIG(self, data):
-        logging.info('Failsafe config saved')
+        logger.info('Failsafe config saved')
         
     def process_MSP_OSD_CONFIG(self, data):
-        logging.info('OSD_CONFIG received')
+        logger.info('OSD_CONFIG received')
         
     def process_MSP_SET_OSD_CONFIG(self, data):
-        logging.info('OSD config set')
+        logger.info('OSD config set')
         
     def process_MSP_OSD_CHAR_READ(self, data):
-        logging.info('OSD char received')
+        logger.info('OSD char received')
         
     def process_MSP_OSD_CHAR_WRITE(self, data):
-        logging.info('OSD char uploaded')
+        logger.info('OSD char uploaded')
         
     def process_MSP_VTX_CONFIG(self, data):
-        logging.info('VTX_CONFIG received')
+        logger.info('VTX_CONFIG received')
         
     def process_MSP_SET_VTX_CONFIG(self, data):
-        logging.info('VTX_CONFIG set')
+        logger.info('VTX_CONFIG set')
         
     def process_MSP_SET_NAME(self, data):
-        logging.info('Name set')
+        logger.info('Name set')
         
     def process_MSP_SET_FILTER_CONFIG(self, data):
-        logging.info('Filter config set')
+        logger.info('Filter config set')
         
     def process_MSP_SET_ADVANCED_CONFIG(self, data):
-        logging.info('Advanced config parameters set')
+        logger.info('Advanced config parameters set')
         
     def process_MSP_SET_SENSOR_CONFIG(self, data):
-        logging.info('Sensor config parameters set')
+        logger.info('Sensor config parameters set')
         
     def process_MSP_COPY_PROFILE(self, data):
-        logging.info('Copy profile')
+        logger.info('Copy profile')
         
     def process_MSP_ARMING_DISABLE(self, data):
-        logging.info('Arming disable')
+        logger.info('Arming disable')
         
     def process_MSP_SET_RTC(self, data):
-        logging.info('Real time clock set')
+        logger.info('Real time clock set')
